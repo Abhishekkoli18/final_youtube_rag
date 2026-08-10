@@ -26,6 +26,7 @@ from flask import Flask, render_template, request, jsonify, session
 from dotenv import load_dotenv
 
 from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api.proxies import WebshareProxyConfig
 from youtube_transcript_api._errors import (
     TranscriptsDisabled,
     NoTranscriptFound,
@@ -103,6 +104,28 @@ def format_duration(seconds: float) -> str:
     return f"{minutes}:{secs:02d} minutes"
 
 
+def get_transcript_client():
+    """
+    Cloud hosts (Render, Railway, AWS, etc.) run on datacenter IPs that
+    YouTube frequently blocks for transcript requests - this works fine
+    locally but fails once deployed. If Webshare proxy credentials are
+    set, route the request through a residential proxy to work around
+    this. Falls back to a direct (unproxied) request otherwise, which is
+    fine for local development.
+    """
+    proxy_username = os.environ.get("WEBSHARE_PROXY_USERNAME")
+    proxy_password = os.environ.get("WEBSHARE_PROXY_PASSWORD")
+
+    if proxy_username and proxy_password:
+        return YouTubeTranscriptApi(
+            proxy_config=WebshareProxyConfig(
+                proxy_username=proxy_username,
+                proxy_password=proxy_password,
+            )
+        )
+    return YouTubeTranscriptApi()
+
+
 def fetch_transcript(video_id: str):
     """
     Returns (transcript_text, duration_seconds, error_message).
@@ -110,7 +133,7 @@ def fetch_transcript(video_id: str):
     """
     try:
         try:
-            ytt_api = YouTubeTranscriptApi()
+            ytt_api = get_transcript_client()
             fetched = ytt_api.fetch(video_id, languages=["en"])
             snippets = [{"text": s.text, "start": s.start, "duration": s.duration} for s in fetched]
         except AttributeError:
@@ -132,7 +155,7 @@ def fetch_transcript(video_id: str):
     except VideoUnavailable:
         return None, 0, "This video is unavailable."
     except Exception as e:
-        return None, 0, f"Could not fetch transcript ({e})."
+        return None, 0, f"Could not fetch transcript ({e}). If this is happening after deploying (works locally, fails on the server), it's likely YouTube blocking the host's IP - see the WEBSHARE_PROXY_USERNAME/WEBSHARE_PROXY_PASSWORD setup in the README."
 
 
 def build_vector_store(transcript_text: str):
