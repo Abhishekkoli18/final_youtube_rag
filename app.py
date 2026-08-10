@@ -187,7 +187,7 @@ def fetch_transcript(video_id: str, max_retries: int = 3):
             last_error = e
             is_rate_limited = "429" in str(e) or "too many" in str(e).lower()
             if is_rate_limited and attempt < max_retries - 1:
-                time.sleep(2 ** attempt)  # 1s, 2s, 4s backoff
+                time.sleep(1.5 * (attempt + 1))  # 1s, 2s, 4s backoff
                 continue
             break
 
