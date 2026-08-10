@@ -19,6 +19,7 @@ Then open http://localhost:5000
 
 import os
 import re
+import time
 import uuid
 
 import requests
@@ -112,50 +113,91 @@ def get_transcript_client():
     set, route the request through a residential proxy to work around
     this. Falls back to a direct (unproxied) request otherwise, which is
     fine for local development.
+
+    filter_ip_locations narrows the Webshare IP pool to specific countries.
+    This can help because YouTube's blocking is inconsistent across the
+    proxy pool - some regions get hit harder than others. Set
+    WEBSHARE_PROXY_COUNTRIES in .env (comma-separated, e.g. "us,de") to
+    override the default.
     """
     proxy_username = os.environ.get("WEBSHARE_PROXY_USERNAME")
     proxy_password = os.environ.get("WEBSHARE_PROXY_PASSWORD")
 
     if proxy_username and proxy_password:
+        countries_env = os.environ.get("WEBSHARE_PROXY_COUNTRIES", "us")
+        countries = [c.strip() for c in countries_env.split(",") if c.strip()]
+
         return YouTubeTranscriptApi(
             proxy_config=WebshareProxyConfig(
                 proxy_username=proxy_username,
                 proxy_password=proxy_password,
+                filter_ip_locations=countries,
             )
         )
     return YouTubeTranscriptApi()
 
 
-def fetch_transcript(video_id: str):
+def fetch_transcript(video_id: str, max_retries: int = 3):
     """
     Returns (transcript_text, duration_seconds, error_message).
     Handles both the old (<1.0) and new (>=1.0) youtube-transcript-api versions.
+
+    Retries with backoff on rate-limit-shaped errors (429 / "too many"),
+    since these are often transient - the proxy pool rotates IPs, so a
+    retry a few seconds later frequently succeeds even when the first
+    attempt gets rate-limited.
     """
-    try:
+    last_error = None
+
+    for attempt in range(max_retries):
         try:
             ytt_api = get_transcript_client()
             fetched = ytt_api.fetch(video_id, languages=["en"])
             snippets = [{"text": s.text, "start": s.start, "duration": s.duration} for s in fetched]
+
+            transcript_text = " ".join(chunk["text"] for chunk in snippets)
+
+            duration_seconds = 0
+            if snippets:
+                last = snippets[-1]
+                duration_seconds = last["start"] + last["duration"]
+
+            return transcript_text, duration_seconds, None
+
         except AttributeError:
-            snippets = YouTubeTranscriptApi.get_transcript(video_id, languages=["en"])
+            try:
+                snippets = YouTubeTranscriptApi.get_transcript(video_id, languages=["en"])
+                transcript_text = " ".join(chunk["text"] for chunk in snippets)
+                duration_seconds = 0
+                if snippets:
+                    last = snippets[-1]
+                    duration_seconds = last["start"] + last["duration"]
+                return transcript_text, duration_seconds, None
+            except Exception as e:
+                last_error = e
+                break
 
-        transcript_text = " ".join(chunk["text"] for chunk in snippets)
+        except TranscriptsDisabled:
+            return None, 0, "Captions are disabled for this video."
+        except NoTranscriptFound:
+            return None, 0, "No English transcript is available for this video."
+        except VideoUnavailable:
+            return None, 0, "This video is unavailable."
+        except Exception as e:
+            last_error = e
+            is_rate_limited = "429" in str(e) or "too many" in str(e).lower()
+            if is_rate_limited and attempt < max_retries - 1:
+                time.sleep(2 ** attempt)  # 1s, 2s, 4s backoff
+                continue
+            break
 
-        duration_seconds = 0
-        if snippets:
-            last = snippets[-1]
-            duration_seconds = last["start"] + last["duration"]
-
-        return transcript_text, duration_seconds, None
-
-    except TranscriptsDisabled:
-        return None, 0, "Captions are disabled for this video."
-    except NoTranscriptFound:
-        return None, 0, "No English transcript is available for this video."
-    except VideoUnavailable:
-        return None, 0, "This video is unavailable."
-    except Exception as e:
-        return None, 0, f"Could not fetch transcript ({e}). If this is happening after deploying (works locally, fails on the server), it's likely YouTube blocking the host's IP - see the WEBSHARE_PROXY_USERNAME/WEBSHARE_PROXY_PASSWORD setup in the README."
+    return None, 0, (
+        f"Could not fetch transcript after {max_retries} attempt(s) ({last_error}). "
+        "If this is happening after deploying (works locally, fails on the server), "
+        "it's likely YouTube rate-limiting the proxy IP pool - see the "
+        "WEBSHARE_PROXY_USERNAME/WEBSHARE_PROXY_PASSWORD setup in the README, or "
+        "try again in a few minutes."
+    )
 
 
 def build_vector_store(transcript_text: str):
