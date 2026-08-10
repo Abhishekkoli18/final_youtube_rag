@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>YouTube RAG Assistant</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+
+<div class="app-shell">
+
+  <!-- ============ SIDEBAR ============ -->
+  <aside class="sidebar">
+    <div class="sidebar-section">
+      <h2 class="sidebar-title"><span class="icon">&#128279;</span> YouTube Video</h2>
+
+      <label class="field-label" for="video-url">Paste YouTube URL</label>
+      <input type="text" id="video-url" class="text-input" placeholder="https://www.youtube.com/watch?v=...">
+
+      <button id="load-btn" class="btn-primary">
+        <span id="load-btn-text">Load Video</span>
+        <span id="load-spinner" class="spinner hidden"></span>
+      </button>
+
+      <div id="status-box" class="status-box hidden"></div>
+    </div>
+
+    <div class="sidebar-section">
+      <h2 class="sidebar-title"><span class="icon">&#8505;</span> About</h2>
+      <p class="muted-text">
+        This app uses RAG (Retrieval Augmented Generation) to answer questions
+        about YouTube videos using AI. Transcript chunks are embedded locally
+        and retrieved with FAISS before being sent to the model.
+      </p>
+    </div>
+
+    <div class="sidebar-section">
+      <h2 class="sidebar-title"><span class="icon">&#128161;</span> Tips</h2>
+      <p class="muted-text">Try asking:</p>
+      <div class="tip-list" id="tip-list">
+        <button class="tip-btn" data-question="Give me a summary of this video" disabled>Give me a summary of this video</button>
+        <button class="tip-btn" data-question="What are the main points?" disabled>What are the main points?</button>
+        <button class="tip-btn" data-question="Who is the speaker?" disabled>Who is the speaker?</button>
+        <button class="tip-btn" data-question="Explain this in detail" disabled>Explain this in detail</button>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ============ MAIN CHAT ============ -->
+  <main class="chat-area">
+    <header class="chat-header">
+      <div>
+        <h1><span class="icon">&#129302;</span> YouTube RAG Assistant</h1>
+        <p class="subtitle">Ask anything about your YouTube video</p>
+      </div>
+      <button id="clear-btn" class="btn-ghost">&#128465; Clear Chat</button>
+    </header>
+
+    <div id="messages" class="messages">
+      <div class="empty-state" id="empty-state">
+        &#128072; Paste a YouTube URL in the sidebar and click <strong>Load Video</strong> to get started.
+      </div>
+    </div>
+
+    <form id="chat-form" class="chat-input-bar">
+      <input type="text" id="chat-input" placeholder="Ask a question about the video..." disabled autocomplete="off">
+      <button type="submit" id="send-btn" disabled>&#10148;</button>
+    </form>
+  </main>
+
+</div>
+
+<script src="{{ url_for('static', filename='js/script.js') }}"></script>
+</body>
+</html>
