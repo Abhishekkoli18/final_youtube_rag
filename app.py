@@ -17,12 +17,19 @@ Run with:
 Then open http://localhost:5000
 """
 
+import glob
 import os
 import re
+import tempfile
 import time
 import uuid
 
+try:
+    import openai
+except ImportError:
+    openai = None
 import requests
+import yt_dlp
 from flask import Flask, render_template, request, jsonify, session
 from dotenv import load_dotenv
 
@@ -178,9 +185,11 @@ def fetch_transcript(video_id: str, max_retries: int = 3):
                 break
 
         except TranscriptsDisabled:
-            return None, 0, "Captions are disabled for this video."
+            last_error = "Captions are disabled for this video."
+            break
         except NoTranscriptFound:
-            return None, 0, "No English transcript is available for this video."
+            last_error = "No English transcript is available for this video."
+            break
         except VideoUnavailable:
             return None, 0, "This video is unavailable."
         except Exception as e:
@@ -191,13 +200,130 @@ def fetch_transcript(video_id: str, max_retries: int = 3):
                 continue
             break
 
+    fallback_text, duration_seconds, fallback_error = fetch_transcript_with_ytdlp(video_id)
+    if fallback_text:
+        return fallback_text, duration_seconds, None
+
+    fallback_note = f" Fallback via yt-dlp also failed: {fallback_error}" if fallback_error else ""
     return None, 0, (
-        f"Could not fetch transcript after {max_retries} attempt(s) ({last_error}). "
+        f"Could not fetch transcript after {max_retries} attempt(s) ({last_error})."
+        f"{fallback_note} "
         "If this is happening after deploying (works locally, fails on the server), "
-        "it's likely YouTube rate-limiting the proxy IP pool - see the "
-        "WEBSHARE_PROXY_USERNAME/WEBSHARE_PROXY_PASSWORD setup in the README, or "
-        "try again in a few minutes."
+        "use yt-dlp / audio transcription fallback or the WEBSHARE_PROXY_USERNAME/"
+        "WEBSHARE_PROXY_PASSWORD setup in the README."
     )
+
+
+def _parse_subtitle_text(file_path: str) -> str:
+    with open(file_path, "r", encoding="utf-8", errors="ignore") as fh:
+        text = fh.read()
+
+    lower_path = file_path.lower()
+    if lower_path.endswith(".vtt"):
+        lines = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("WEBVTT") or "-->" in line or line.isdigit():
+                continue
+            lines.append(line)
+        return " ".join(lines)
+
+    if lower_path.endswith(".srt"):
+        lines = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.isdigit() or "-->" in line:
+                continue
+            lines.append(line)
+        return " ".join(lines)
+
+    return " ".join(line.strip() for line in text.splitlines() if line.strip())
+
+
+def fetch_transcript_with_ytdlp(video_id: str):
+    video_url = f"https://www.youtube.com/watch?v={video_id}"
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ydl_opts = {
+                "skip_download": True,
+                "writesubtitles": True,
+                "writeautomaticsub": True,
+                "subtitleslangs": ["en"],
+                "outtmpl": os.path.join(tmpdir, "%(id)s.%(ext)s"),
+                "quiet": True,
+                "no_warnings": True,
+                "noprogress": True,
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(video_url, download=False)
+                ydl.download([video_url])
+
+            subtitle_texts = []
+            for pattern in ("*.vtt", "*.srt", "*.ttml", "*.json"):
+                for file_path in glob.glob(os.path.join(tmpdir, pattern)):
+                    parsed = _parse_subtitle_text(file_path)
+                    if parsed:
+                        subtitle_texts.append(parsed)
+
+            transcript_text = " ".join(subtitle_texts).strip()
+            duration_seconds = int(info.get("duration") or 0)
+
+            if transcript_text:
+                return transcript_text, duration_seconds, None
+
+            if os.environ.get("OPENAI_API_KEY"):
+                return transcribe_audio_with_openai(video_id)
+
+            return None, duration_seconds, "No English subtitles were found with yt-dlp and OPENAI_API_KEY is not configured for audio transcription."
+
+    except Exception as e:
+        return None, 0, f"yt-dlp fallback failed: {e}"
+
+
+def transcribe_audio_with_openai(video_id: str):
+    if openai is None:
+        return None, 0, "OpenAI package is not installed for audio transcription."
+
+    openai_api_key = os.environ.get("OPENAI_API_KEY")
+    if not openai_api_key:
+        return None, 0, "OPENAI_API_KEY is not configured for audio transcription."
+
+    openai.api_key = openai_api_key
+    model = os.environ.get("OPENAI_TRANSCRIPTION_MODEL", "gpt-4o-transcribe")
+    video_url = f"https://www.youtube.com/watch?v={video_id}"
+
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ydl_opts = {
+                "format": "bestaudio/best",
+                "outtmpl": os.path.join(tmpdir, "%(id)s.%(ext)s"),
+                "quiet": True,
+                "no_warnings": True,
+                "noprogress": True,
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(video_url, download=True)
+                audio_path = ydl.prepare_filename(info)
+
+            if not os.path.exists(audio_path):
+                return None, 0, "Failed to save audio for transcription."
+
+            with open(audio_path, "rb") as audio_file:
+                transcription = openai.Audio.transcribe(model, audio_file)
+
+            transcript_text = (
+                transcription.get("text")
+                if isinstance(transcription, dict)
+                else getattr(transcription, "text", None)
+            )
+            duration_seconds = int(info.get("duration") or 0)
+            if transcript_text:
+                return transcript_text.strip(), duration_seconds, None
+
+            return None, duration_seconds, "Audio transcription returned empty text."
+
+    except Exception as e:
+        return None, 0, f"Audio transcription failed: {e}"
 
 
 def build_vector_store(transcript_text: str):
