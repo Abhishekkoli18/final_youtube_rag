@@ -8,7 +8,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Hugging Face Spaces expects the app to listen on port 7860
-ENV PORT=7860
-EXPOSE 7860
+ENV PORT=3000
+EXPOSE 3000
 
 CMD ["gunicorn", "-w", "2", "-b", "0.0.0.0:7860", "app:app"]
